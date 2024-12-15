@@ -43,19 +43,17 @@
     
 
   Future<void> _showCheckoutDialog(String playerName) async {
-  debugPrint('Starting checkout process for: $playerName');
-
-    
+    debugPrint('Starting checkout process for: $playerName');
 
     try {
       // Correct filter syntax
-      final filter = 'player_name="$playerName" && status="Active"';
+      final filter = 'player_name="$playerName" && (status="Active" || status="Timeout")';
       debugPrint('Filter used: $filter');
-      
-      
-
+    
       // Fetch active bookings for the player
       final bookings = await pb.collection('bookings').getFullList(filter: filter);
+      debugPrint('Bookings fetched: ${bookings.map((b) => b.toJson()).toList()}');
+
 
       if (bookings.isEmpty) {
         debugPrint('No active bookings found for: $playerName');
@@ -197,6 +195,7 @@
       // Update the booking status to "Completed"
       await pb.collection('bookings').update(booking.id, body: {
         'status': 'Paid',
+        
       });
 
 
@@ -217,6 +216,11 @@
       _loadBookings();
       _startTimer();
     }
+    Future<void> _initializeData() async {
+      await _loadUnits();  // Load all available units first
+      await _loadBookings(); // Then load bookings
+}
+
 
     @override
     void dispose() {
@@ -232,7 +236,11 @@
             final units = await pb.collection('units').getFullList(filter: 'is_active=true');
 
             setState(() {
-              _bookings.clear();
+              if (_bookings.isEmpty) {
+                  _bookings.clear();
+                }
+
+
               for (var unit in units) {
                 final unitType = unit.data['unit_type'];
                 final unitNumber = unit.data['unit_number'];
@@ -246,12 +254,15 @@
             debugPrint('Units successfully loaded.');
           } catch (e) {
             debugPrint('Error loading units: $e');
+            _showSnackBar('Error loading units. Please try again.');
           }
         }
 
 
     Future<void> _loadBookings() async {
       try {
+      // First, load all active units from the database
+      await _loadUnits();  
       // Fetch both active and timed-out bookings
       final result = await pb.collection('bookings').getFullList(
         filter: 'status = "Active" || status = "Timeout"',
@@ -259,11 +270,11 @@
 
 
         setState(() {
-          _bookings.clear();
+          // _bookings.clear();
 
           // Initialize units with default values
-          _bookings['PS5'] = {for (int i = 1; i <= 5; i++) i: null};
-          _bookings['Pool Table'] = {for (int i = 1; i <= 2; i++) i: null};
+          // _bookings['PS5'] = {for (int i = 1; i <= 5; i++) i: null};
+          // _bookings['Pool Table'] = {for (int i = 1; i <= 2; i++) i: null};
 
           for (var record in result) {
             final unitType = record.data['unit_type'] ?? 'Unknown';
@@ -281,6 +292,7 @@
             final startTime = (startTimeString != null) 
                 ? DateTime.parse(startTimeString).toUtc() 
                 : DateTime.now().toUtc();
+
 
             _bookings[unitType] ??= {};
             _bookings[unitType]![unitNumber] = BookingInfo(
@@ -897,10 +909,10 @@
 
   @override
   Widget build(BuildContext context) {
-  final screenWidth = MediaQuery.of(context).size.width;
-  final crossAxisCount = (screenWidth >= 1200) ? 4 : (screenWidth >= 800) ? 3 : 2;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final crossAxisCount = (screenWidth >= 1200) ? 4 : (screenWidth >= 800) ? 3 : 2;
 
-  final items = _selectedTab == 'Games' ? _buildGameItems() : _buildFoodItems();
+    final items = _selectedTab == 'Games' ? _buildGameItems() : _buildFoodItems();
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -953,7 +965,7 @@
         'unitType': entry.key,
         'unitNumber': unit.key,
         // Use the exact player name from the database, without prefixing
-        'playerName': isBooked ? booking.playerName : 'Available',
+        'playerName': isBooked || isTimeout ? booking.playerName : 'Available',
         // Show remaining minutes only if the unit is booked
         'duration': isTimeout
             ? 'Timed Out'
@@ -975,20 +987,25 @@ List<Map<String, dynamic>> _buildFoodItems() {
 
 
   Widget _buildGridItem(Map<String, dynamic> item) {
-  final isFoodsTab = _selectedTab == 'Foods';
-  final isTimeout = item['status'] == 'Timeout';
-  final isPlayerActive = !isFoodsTab && item['playerName'] != null && item['playerName'] != 'Available';
+    final isFoodsTab = _selectedTab == 'Foods';
+    final isTimeout = item['status'] == 'Timeout';
+    final isPlayerActive = !isFoodsTab && item['playerName'] != null && item['playerName'] != 'Available';
+    final isBooked = item['status'] == 'Booked';
 
-  final unitType = item['unitType'] ?? ''; // Use unitType directly
-  final unitNumber = item['unitNumber'] ?? 0; // Use unitNumber directly
-  
+    final unitType = item['unitType'] ?? ''; // Use unitType directly
+    final unitNumber = item['unitNumber'] ?? 0; // Use unitNumber directly
+    
 
   return GestureDetector(
     onTap: () {
       if (isFoodsTab) {
         _showOrderDialog(item['title'] ?? 'Unknown'); // Show food ordering dialog
       } else if (isTimeout) {
-        _showCheckoutDialog(item['playerName'] ?? 'Unknown'); // Timeout units proceed to checkout
+        if (item['playerName'] != 'Available') {
+          _showCheckoutDialog(item['playerName']); // Timeout units proceed to checkout
+        } else {
+          _showSnackBar('Cannot checkout an available unit.');
+        } // Timeout units proceed to checkout
       } else if (isPlayerActive) {
         _showCheckoutDialog(item['playerName'] ?? 'Unknown'); // Show checkout dialog
       } else {
@@ -1004,7 +1021,9 @@ List<Map<String, dynamic>> _buildFoodItems() {
             borderRadius: const BorderRadius.all(Radius.circular(18)),
             color: isTimeout
                 ? Colors.red.shade900 // Highlight timed-out units in red
-                : const Color(0xff1f2029),
+                : isBooked
+                    ? Colors.green.shade700 // Booked = green
+                    : const Color(0xff1f2029), // Default = dark gray
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1016,37 +1035,39 @@ List<Map<String, dynamic>> _buildFoodItems() {
                     borderRadius: BorderRadius.circular(16),
                     image: DecorationImage(
                       image: AssetImage(item['image'] ?? 'assets/icons/default_icon.png'),
-                      fit: BoxFit.scaleDown,
+                      fit: BoxFit.contain,
                     ),
                   ),
                 ),
               ),
               const SizedBox(height: 10),
               Text(
-                item['title'] ?? 'Unknown',
+                'Unit: ${item['title'] ?? ''}', // Add "Duration:" prefix
+                // item['title'] ?? 'Unknown',
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,
-                  fontSize: 14,
+                  fontSize: 15,
                 ),
               ),
               const SizedBox(height: 10),
               if (!isFoodsTab && isPlayerActive)
                 Text(
-                  item['playerName'] ?? '',
-                  style: const TextStyle(
-                    color: Colors.white54,
+                  'Player Name: ${item['playerName'] ?? ''}', // Add "Player Name:" prefix
+                    style: const TextStyle(
+                    color: Color.fromARGB(255, 255, 255, 255),
                     fontWeight: FontWeight.bold,
-                    fontSize: 10,
+                    fontSize: 16,
                   ),
                 ),
               if (!isFoodsTab && item['duration'] != null && item['duration'] != '')
                 ...[
                   const SizedBox(height: 10),
                   Text(
-                    item['duration'] ?? '',
+                    'Duration: ${item['duration'] ?? ''}', // Add "Duration:" prefix
                     style: const TextStyle(
-                      color: Colors.deepOrange,
+                      color: Color.fromARGB(255, 253, 0, 0),
+                      fontWeight: FontWeight.bold,
                       fontSize: 16,
                     ),
                   ),
